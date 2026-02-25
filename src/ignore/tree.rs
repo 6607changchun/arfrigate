@@ -11,6 +11,12 @@ pub struct IgnoreMatchPattern {
 
 impl From<String> for IgnoreMatchPattern {
     fn from(value: String) -> Self {
+        let str_value: &str = &value;
+        str_value.into()
+    }
+}
+impl From<&str> for IgnoreMatchPattern {
+    fn from(value: &str) -> Self {
         if value.is_empty() {
             return Self {
                 pattern_part: vec![],
