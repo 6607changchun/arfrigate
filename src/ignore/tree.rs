@@ -6,6 +6,7 @@ pub enum IgnoreMatchPatternType {
 }
 
 pub struct IgnoreMatchPattern {
+    original_pattern: String,
     pattern_part: Vec<IgnoreMatchPatternType>,
 }
 
@@ -19,11 +20,13 @@ impl From<&str> for IgnoreMatchPattern {
     fn from(value: &str) -> Self {
         if value.is_empty() {
             return Self {
+                original_pattern: value.to_string(),
                 pattern_part: vec![],
             };
         }
         if value == "*" {
             return Self {
+                original_pattern: value.to_string(),
                 pattern_part: vec![IgnoreMatchPatternType::Wildcard],
             };
         }
@@ -41,7 +44,16 @@ impl From<&str> for IgnoreMatchPattern {
             })
             .collect();
         pattern_part.remove(pattern_part.len() - 1);
-        Self { pattern_part }
+        Self {
+            pattern_part,
+            original_pattern: value.to_string(),
+        }
+    }
+}
+
+impl From<IgnoreMatchPattern> for String {
+    fn from(value: IgnoreMatchPattern) -> Self {
+        value.original_pattern
     }
 }
 
@@ -73,24 +85,291 @@ impl IgnoreMatchPattern {
                         if pending_index.is_none() {
                             return false;
                         }
-                        match_index = pending_index.unwrap() + part.len();
+                        match_index = match_index + pending_index.unwrap() + part.len();
+                        wildcard_mode = false;
                     } else {
                         //compare the literal value
                         let pattern_len = part.len();
+                        if match_index + pattern_len > target.as_ref().len() {
+                            return false;
+                        }
                         let target_part =
                             &target.as_ref()[match_index..(match_index + pattern_len)];
                         if target_part != part {
                             return false;
+                        } else {
+                            match_index += pattern_len;
                         }
                     }
                 }
             }
         }
-        true
+        if wildcard_mode {
+            true
+        } else {
+            match_index == target.as_ref().len()
+        }
+    }
+    pub fn get_original_pattern(&self) -> &str {
+        &self.original_pattern
     }
 }
 
-pub struct IgnoreTreeNode {}
+pub enum IgnoreTreePattern {
+    WildCardAll,
+    Regular(IgnoreMatchPattern),
+}
+
+impl IgnoreTreePattern {
+    pub fn match_pattern<P>(&self, target: P) -> bool
+    where
+        P: AsRef<str>,
+    {
+        if let Self::Regular(regular) = self {
+            regular.match_pattern(target)
+        } else {
+            true
+        }
+    }
+}
+
+pub struct IgnoreTreeNode {
+    ruleset: Vec<(IgnoreTreePattern, Option<IgnoreTreeNode>)>,
+    exclude: Vec<(IgnoreTreePattern, Option<IgnoreTreeNode>)>,
+}
+
+impl From<String> for IgnoreTreeNode {
+    fn from(value: String) -> Self {
+        let str_value: &str = &value;
+        str_value.into()
+    }
+}
+
+impl From<&str> for IgnoreTreeNode {
+    fn from(value: &str) -> Self {
+        let mut ruleset = vec![];
+        let mut exclude = vec![];
+        let whitelist;
+        let pattern: &str;
+        let current_pattern;
+        if value.starts_with("!") {
+            whitelist = false;
+            pattern = &value[1..];
+        } else {
+            whitelist = true;
+            pattern = &value[..];
+        }
+        let components = pattern.split_once("/");
+        match components {
+            None => {
+                if pattern == "**" {
+                    current_pattern = (IgnoreTreePattern::WildCardAll, None);
+                } else {
+                    current_pattern = (IgnoreTreePattern::Regular(pattern.into()), None);
+                }
+            }
+            Some((prefix, suffix)) => {
+                let remaining_child: IgnoreTreeNode = suffix.into();
+                if prefix == "**" {
+                    current_pattern = (IgnoreTreePattern::WildCardAll, Some(remaining_child));
+                } else {
+                    current_pattern = (
+                        IgnoreTreePattern::Regular(prefix.into()),
+                        Some(remaining_child),
+                    );
+                }
+            }
+        }
+
+        if whitelist {
+            ruleset.push(current_pattern);
+        } else {
+            exclude.push(current_pattern);
+        }
+
+        Self { ruleset, exclude }
+    }
+}
+
+impl IgnoreTreeNode {
+    pub fn new() -> Self {
+        Self {
+            ruleset: vec![],
+            exclude: vec![],
+        }
+    }
+
+    pub fn add_path<P>(&mut self, target: P)
+    where
+        P: AsRef<str>,
+    {
+        //TODO
+        if target.as_ref() == "" {
+            return;
+        }
+        let actual_target;
+        let black;
+        if target.as_ref().starts_with("!") {
+            black = true;
+            actual_target = &target.as_ref()[1..];
+        } else {
+            black = false;
+            actual_target = &target.as_ref()[..];
+        }
+        let target_list = if black {
+            &mut self.exclude
+        } else {
+            &mut self.ruleset
+        };
+        let split_result = actual_target.split_once("/");
+        match split_result {
+            Some((prefix, suffix)) => {
+                //multi level
+                for elem in target_list.iter_mut() {
+                    if let Some(child) = elem.1.as_mut() {
+                        match &elem.0 {
+                            IgnoreTreePattern::WildCardAll => {
+                                if prefix == "**" {
+                                    child.add_path(suffix);
+                                    return;
+                                }
+                            }
+                            IgnoreTreePattern::Regular(regular) => {
+                                if regular.get_original_pattern() == prefix {
+                                    child.add_path(suffix);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                let new_child;
+                if prefix == "**" {
+                    new_child = (IgnoreTreePattern::WildCardAll, Some(suffix.into()));
+                } else {
+                    new_child = (
+                        IgnoreTreePattern::Regular(prefix.into()),
+                        Some(suffix.into()),
+                    );
+                }
+                target_list.push(new_child);
+            }
+            None => {
+                //single level
+                for elem in target_list.iter() {
+                    if let None = elem.1 {
+                        match &elem.0 {
+                            IgnoreTreePattern::WildCardAll => {
+                                if actual_target == "**" {
+                                    return;
+                                }
+                            }
+                            IgnoreTreePattern::Regular(regular) => {
+                                if regular.get_original_pattern() == actual_target {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                let new_child;
+                if actual_target == "**" {
+                    new_child = (IgnoreTreePattern::WildCardAll, None);
+                } else {
+                    new_child = (IgnoreTreePattern::Regular(actual_target.into()), None);
+                }
+                target_list.push(new_child);
+            }
+        }
+    }
+
+    pub fn match_pattern<P>(&self, target: P) -> bool
+    where
+        P: AsRef<str>,
+    {
+        let components = target.as_ref().split_once("/");
+        match components {
+            Some((prefix, suffix)) => {
+                // multi level
+                self.ruleset.iter().any(|rule| {
+                    (rule.1.is_none()
+                        && match &rule.0 {
+                            IgnoreTreePattern::WildCardAll => true,
+                            _ => false,
+                        })
+                        || (rule.1.is_some()
+                            && match &rule.0 {
+                                IgnoreTreePattern::Regular(regular) => {
+                                    regular.match_pattern(prefix)
+                                        && rule.1.as_ref().unwrap().match_pattern(suffix)
+                                }
+                                IgnoreTreePattern::WildCardAll => {
+                                    let mut pending_split = Some(("", target.as_ref()));
+                                    let mut matching = false;
+                                    while pending_split.is_some() {
+                                        let (_, pending_suffix) = pending_split.unwrap();
+                                        if rule.1.as_ref().unwrap().match_pattern(pending_suffix) {
+                                            matching = true;
+                                            break;
+                                        }
+                                        pending_split = pending_suffix.split_once("/");
+                                    }
+                                    matching
+                                }
+                            })
+                }) && self.exclude.iter().all(|black| {
+                    (black.1.is_none()
+                        && match &black.0 {
+                            IgnoreTreePattern::WildCardAll => false,
+                            _ => true,
+                        })
+                        || (black.1.is_some()
+                            && match &black.0 {
+                                IgnoreTreePattern::WildCardAll => {
+                                    let mut pending_split = Some(("", target.as_ref()));
+                                    let mut matching = false;
+                                    while pending_split.is_some() {
+                                        let (_, pending_suffix) = pending_split.unwrap();
+                                        if black.1.as_ref().unwrap().match_pattern(pending_suffix) {
+                                            matching = true;
+                                            break;
+                                        }
+                                        pending_split = pending_suffix.split_once("/");
+                                    }
+                                    !matching
+                                }
+                                IgnoreTreePattern::Regular(regular) => {
+                                    !regular.match_pattern(prefix)
+                                        || !black.1.as_ref().unwrap().match_pattern(suffix)
+                                }
+                            })
+                })
+            }
+            None => {
+                // single level
+                self.ruleset.iter().any(|rule| {
+                    (rule.1.is_none() && rule.0.match_pattern(target.as_ref()))
+                        || rule.1.is_some()
+                            && match &rule.0 {
+                                IgnoreTreePattern::WildCardAll => {
+                                    rule.1.as_ref().unwrap().match_pattern(target.as_ref())
+                                }
+                                _ => false,
+                            }
+                }) && self.exclude.iter().all(|black| {
+                    (black.1.is_some()
+                        && match &black.0 {
+                            IgnoreTreePattern::WildCardAll => {
+                                !black.1.as_ref().unwrap().match_pattern(target.as_ref())
+                            }
+                            _ => true,
+                        })
+                        || (black.1.is_none() && !black.0.match_pattern(target.as_ref()))
+                })
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -118,5 +397,17 @@ mod tests {
         assert_eq!(pattern.get_pattern().len(), 0);
         assert!(pattern.match_pattern(""));
         assert!(!pattern.match_pattern("*"));
+    }
+
+    #[test]
+    fn test_corner_matching() {
+        let pattern: IgnoreMatchPattern = "abc".into();
+        assert!(pattern.match_pattern("abc"));
+        assert!(!pattern.match_pattern("abcd"));
+        let pattern: IgnoreMatchPattern = "abcdefg".into();
+        assert!(pattern.match_pattern("abcdefg"));
+        assert!(!pattern.match_pattern("abcd"));
+        let pattern: IgnoreMatchPattern = "a*c".into();
+        assert!(pattern.match_pattern("abc"));
     }
 }
