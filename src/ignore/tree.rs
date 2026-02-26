@@ -152,12 +152,15 @@ impl From<&str> for IgnoreTreeNode {
         let whitelist;
         let pattern: &str;
         let current_pattern;
-        if value.starts_with("!") {
-            whitelist = false;
-            pattern = &value[1..];
-        } else {
-            whitelist = true;
-            pattern = &value[..];
+        match value.strip_prefix("!") {
+            Some(stripped) => {
+                whitelist = false;
+                pattern = stripped;
+            }
+            None => {
+                whitelist = true;
+                pattern = value;
+            }
         }
         let components = pattern.split_once("/");
         match components {
@@ -191,6 +194,12 @@ impl From<&str> for IgnoreTreeNode {
     }
 }
 
+impl Default for IgnoreTreeNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IgnoreTreeNode {
     pub fn new() -> Self {
         Self {
@@ -214,7 +223,7 @@ impl IgnoreTreeNode {
             actual_target = &target.as_ref()[1..];
         } else {
             black = false;
-            actual_target = &target.as_ref()[..];
+            actual_target = target.as_ref();
         }
         let target_list = if black {
             &mut self.exclude
@@ -243,21 +252,20 @@ impl IgnoreTreeNode {
                         }
                     }
                 }
-                let new_child;
-                if prefix == "**" {
-                    new_child = (IgnoreTreePattern::WildCardAll, Some(suffix.into()));
+                let new_child = if prefix == "**" {
+                    (IgnoreTreePattern::WildCardAll, Some(suffix.into()))
                 } else {
-                    new_child = (
+                    (
                         IgnoreTreePattern::Regular(prefix.into()),
                         Some(suffix.into()),
-                    );
-                }
+                    )
+                };
                 target_list.push(new_child);
             }
             None => {
                 //single level
                 for elem in target_list.iter() {
-                    if let None = elem.1 {
+                    if elem.1.is_none() {
                         match &elem.0 {
                             IgnoreTreePattern::WildCardAll => {
                                 if actual_target == "**" {
@@ -272,12 +280,11 @@ impl IgnoreTreeNode {
                         }
                     }
                 }
-                let new_child;
-                if actual_target == "**" {
-                    new_child = (IgnoreTreePattern::WildCardAll, None);
+                let new_child = if actual_target == "**" {
+                    (IgnoreTreePattern::WildCardAll, None)
                 } else {
-                    new_child = (IgnoreTreePattern::Regular(actual_target.into()), None);
-                }
+                    (IgnoreTreePattern::Regular(actual_target.into()), None)
+                };
                 target_list.push(new_child);
             }
         }
@@ -292,11 +299,7 @@ impl IgnoreTreeNode {
             Some((prefix, suffix)) => {
                 // multi level
                 self.ruleset.iter().any(|rule| {
-                    (rule.1.is_none()
-                        && match &rule.0 {
-                            IgnoreTreePattern::WildCardAll => true,
-                            _ => false,
-                        })
+                    (rule.1.is_none() && matches!(&rule.0, IgnoreTreePattern::WildCardAll))
                         || (rule.1.is_some()
                             && match &rule.0 {
                                 IgnoreTreePattern::Regular(regular) => {
@@ -318,11 +321,7 @@ impl IgnoreTreeNode {
                                 }
                             })
                 }) && self.exclude.iter().all(|black| {
-                    (black.1.is_none()
-                        && match &black.0 {
-                            IgnoreTreePattern::WildCardAll => false,
-                            _ => true,
-                        })
+                    (black.1.is_none() && !matches!(&black.0, IgnoreTreePattern::WildCardAll))
                         || (black.1.is_some()
                             && match &black.0 {
                                 IgnoreTreePattern::WildCardAll => {
